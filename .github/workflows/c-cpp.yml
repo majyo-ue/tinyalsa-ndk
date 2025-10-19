@@ -1,38 +1,85 @@
-name: Build tinyalsa-ndk Binaries
+# GitHub Actions workflow to cross-compile tinyalsa-ndk with Android NDK,
+# targeting Android 15 (API 35). If the selected NDK does not accept android-35,
+# the job will retry with APP_PLATFORM=latest as a fallback.
+name: CI / Android NDK Build (Android 15)
 
 on:
   push:
-    branches: [ master ]
-  workflow_dispatch:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
 
 jobs:
-  build:
+  build-android:
+    name: Build (Android NDK)
     runs-on: ubuntu-latest
-
+    strategy:
+      matrix:
+        abi: [arm64-v8a, armeabi-v7a]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Build tinyalsa-ndk binaries
+      - name: Install utilities
         run: |
-          docker run --rm -v $PWD:/build ykasidit/android_ndk_c_rust_go_builder:latest \
-          bash -c "cd /build && ndk-build clean && ndk-build -j $(nproc)"
+          sudo apt-get update
+          sudo apt-get install -y unzip curl
 
-      - name: List built binaries
+      - name: Download Android NDK r26b
+        # r26b chosen to support newer Android API levels (Android 15 / API 35)
         run: |
-          echo "=== ARM64-v8a binaries ==="
-          ls -l libs/arm64-v8a/tiny*
-          echo "=== armeabi-v7a binaries ==="
-          ls -l libs/armeabi-v7a/tiny*
+          set -eux
+          NDK_VERSION="r26b"
+          NDK_ZIP="android-ndk-${NDK_VERSION}-linux.zip"
+          NDK_URL="https://dl.google.com/android/repository/${NDK_ZIP}"
+          curl -fsSL "$NDK_URL" -o "$NDK_ZIP"
+          unzip -q "$NDK_ZIP" -d $HOME
+          echo "ANDROID_NDK_HOME=$HOME/android-ndk-${NDK_VERSION}" >> $GITHUB_ENV
+          echo "$HOME/android-ndk-${NDK_VERSION}" > ndk-path.txt
 
-      - name: Upload ARM64 binaries
-        uses: actions/upload-artifact@v3
-        with:
-          name: tinyalsa-arm64-v8a
-          path: libs/arm64-v8a/tiny*
+      - name: Show ndk-build path
+        run: |
+          echo "NDK path: $ANDROID_NDK_HOME"
+          ls -la "$ANDROID_NDK_HOME"
 
-      - name: Upload ARMv7 binaries
-        uses: actions/upload-artifact@v3
+      - name: Run ndk-build for ABI (target Android 15 / API 35, fallback to latest)
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+        run: |
+          set -eux
+          TARGET_API="android-35"
+          ABI="${{ matrix.abi }}"
+          export PATH="$ANDROID_NDK_HOME:$PATH"
+          if [ ! -x "$ANDROID_NDK_HOME/ndk-build" ]; then
+            echo "ndk-build not found at $ANDROID_NDK_HOME/ndk-build"
+            exit 1
+          fi
+          echo "Attempting ndk-build for ABI=${ABI} APP_PLATFORM=${TARGET_API}"
+          if "$ANDROID_NDK_HOME/ndk-build" -j$(nproc) NDK_PROJECT_PATH=. APP_ABI="${ABI}" APP_PLATFORM="${TARGET_API}" NDK_OUT=out/ndk-out NDK_LIBS_OUT=libs; then
+            echo "ndk-build succeeded with APP_PLATFORM=${TARGET_API}"
+          else
+            echo "ndk-build failed with APP_PLATFORM=${TARGET_API}, retrying with APP_PLATFORM=latest"
+            if "$ANDROID_NDK_HOME/ndk-build" -j$(nproc) NDK_PROJECT_PATH=. APP_ABI="${ABI}" APP_PLATFORM="latest" NDK_OUT=out/ndk-out NDK_LIBS_OUT=libs; then
+              echo "ndk-build succeeded with APP_PLATFORM=latest"
+            else
+              echo "ndk-build failed with both APP_PLATFORM=${TARGET_API} and APP_PLATFORM=latest"
+              exit 1
+            fi
+          fi
+
+      - name: List produced libraries
+        run: |
+          echo "libs directory contents:"
+          if [ -d libs ]; then
+            find libs -maxdepth 3 -type f -print || true
+          else
+            echo "No libs/ directory produced."
+          fi
+
+      - name: Upload Android artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: tinyalsa-armeabi-v7a
-          path: libs/armeabi-v7a/tiny*
+          name: tinyalsa-android-${{ matrix.abi }}
+          path: |
+            libs/${{ matrix.abi }}/**
+            out/ndk-out/**
