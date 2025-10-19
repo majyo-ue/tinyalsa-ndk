@@ -1,79 +1,38 @@
-# GitHub Actions workflow to cross-compile tinyalsa-ndk with Android NDK
-# - Targets Android 15 (API level 35) by default (APP_PLATFORM=android-35)
-# - Builds using ndk-build and the repository's jni/Android.mk
-# - Produces libs/<ABI> artifacts (arm64-v8a and armeabi-v7a by default)
-name: CI / Android NDK Build
+name: Build tinyalsa-ndk Binaries
 
 on:
   push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
+    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
-  build-android:
-    name: Build (Android NDK)
+  build:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        abi: [arm64-v8a, armeabi-v7a]
+
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
 
-      - name: Install utilities
+      - name: Build tinyalsa-ndk binaries
         run: |
-          sudo apt-get update
-          sudo apt-get install -y unzip curl
+          docker run --rm -v $PWD:/build ykasidit/android_ndk_c_rust_go_builder:latest \
+          bash -c "cd /build && ndk-build clean && ndk-build -j $(nproc)"
 
-      - name: Download Android NDK r25c
-        # r25c is chosen as a reasonably recent, stable NDK that supports modern Android API levels.
+      - name: List built binaries
         run: |
-          set -eux
-          NDK_VERSION="r25c"
-          NDK_ZIP="android-ndk-${NDK_VERSION}-linux.zip"
-          NDK_URL="https://dl.google.com/android/repository/${NDK_ZIP}"
-          curl -fsSL "$NDK_URL" -o "$NDK_ZIP"
-          unzip -q "$NDK_ZIP" -d $HOME
-          echo "ANDROID_NDK_HOME=$HOME/android-ndk-${NDK_VERSION}" >> $GITHUB_ENV
-          echo "$HOME/android-ndk-${NDK_VERSION}" > ndk-path.txt
+          echo "=== ARM64-v8a binaries ==="
+          ls -l libs/arm64-v8a/tiny*
+          echo "=== armeabi-v7a binaries ==="
+          ls -l libs/armeabi-v7a/tiny*
 
-      - name: Show ndk-build path
-        run: |
-          echo "NDK path: $ANDROID_NDK_HOME"
-          ls -la "$ANDROID_NDK_HOME"
-
-      - name: Run ndk-build for ABI
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
-        run: |
-          set -eux
-          # Override Android platform to target Android 15 (API 35). Adjust APP_PLATFORM if you want a different API.
-          APP_PLATFORM="android-35"
-          ABI="${{ matrix.abi }}"
-          export PATH="$ANDROID_NDK_HOME:$PATH"
-          # Ensure we run ndk-build in repo root (Android.mk is under jni/)
-          if [ -x "$ANDROID_NDK_HOME/ndk-build" ]; then
-            echo "Running ndk-build for ABI=${ABI} APP_PLATFORM=${APP_PLATFORM}"
-            "$ANDROID_NDK_HOME/ndk-build" -j$(nproc) NDK_PROJECT_PATH=. APP_ABI="${ABI}" APP_PLATFORM="${APP_PLATFORM}" NDK_OUT=out/ndk-out NDK_LIBS_OUT=libs || (echo "ndk-build failed"; exit 1)
-          else
-            echo "ndk-build not found at $ANDROID_NDK_HOME/ndk-build"
-            exit 1
-          fi
-
-      - name: List produced libraries
-        run: |
-          echo "libs directory contents:"
-          if [ -d libs ]; then
-            find libs -maxdepth 3 -type f -print || true
-          else
-            echo "No libs/ directory produced."
-          fi
-
-      - name: Upload Android artifacts
-        uses: actions/upload-artifact@v4
+      - name: Upload ARM64 binaries
+        uses: actions/upload-artifact@v3
         with:
-          name: tinyalsa-android-${{ matrix.abi }}
-          path: |
-            libs/${{ matrix.abi }}/**
-            out/ndk-out/**
+          name: tinyalsa-arm64-v8a
+          path: libs/arm64-v8a/tiny*
+
+      - name: Upload ARMv7 binaries
+        uses: actions/upload-artifact@v3
+        with:
+          name: tinyalsa-armeabi-v7a
+          path: libs/armeabi-v7a/tiny*
