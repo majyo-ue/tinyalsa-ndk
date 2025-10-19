@@ -1,0 +1,108 @@
+# GitHub Actions workflow to build tinyalsa-ndk
+# - Builds native executables on ubuntu-latest using the provided Makefile
+# - Optionally attempts an Android NDK build (downloads NDK r21e) and runs ndk-build
+# Trigger: push and pull_request
+name: CI / Build
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-native:
+    name: Build (native / Makefile)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake libtool pkg-config unzip
+
+      - name: Build with Makefile
+        run: |
+          set -eux
+          # Use the repository Makefile to build host/linux binaries
+          make clean || true
+          make
+
+      - name: Smoke check produced binaries
+        run: |
+          echo "Produced files:"
+          ls -la || true
+          for f in tinymix tinyplay tinycap tinypcminfo libtinyalsa.so; do
+            if [ -f "$f" ]; then
+              echo "$f: $(file $f)"
+            else
+              echo "$f: not produced"
+            fi
+          done
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tinyalsa-native-binaries
+          path: |
+            libtinyalsa.so
+            tinyplay
+            tinycap
+            tinymix
+            tinypcminfo
+
+  android-ndk-build:
+    name: Build (Android NDK - optional)
+    runs-on: ubuntu-latest
+    needs: build-native
+    if: always() # try, but do not fail the entire workflow if it fails (we handle errors gracefully)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java (required by some Android SDK tools)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '11'
+
+      - name: Download and install Android NDK r21e
+        # r21e is chosen for reproducibility; you can change to another NDK release if desired.
+        run: |
+          set -eux
+          NDK_URL="https://dl.google.com/android/repository/android-ndk-r21e-linux-x86_64.zip"
+          curl -fsSL "$NDK_URL" -o ndk.zip
+          unzip -q ndk.zip -d $HOME
+          echo "ANDROID_NDK_HOME=$HOME/android-ndk-r21e" >> $GITHUB_ENV
+          echo "$HOME/android-ndk-r21e" > ndk-path.txt
+      - name: Run ndk-build (if available)
+        run: |
+          set -eux
+          if [ -x "$HOME/android-ndk-r21e/ndk-build" ]; then
+            echo "Found ndk-build, invoking..."
+            # Export for ndk-build invocation
+            export ANDROID_NDK_HOME="$HOME/android-ndk-r21e"
+            export PATH="$ANDROID_NDK_HOME:$PATH"
+            # Run ndk-build in the repository root (Android.mk is in jni/)
+            "$ANDROID_NDK_HOME/ndk-build" NDK_PROJECT_PATH=. || true
+          else
+            echo "ndk-build not found; skipping ndk-build step"
+          fi
+
+      - name: List libs directory
+        run: |
+          echo "libs/ and obj/ (if produced):"
+          ls -la || true
+          if [ -d libs ]; then
+            find libs -maxdepth 3 -type f -print || true
+          fi
+
+      - name: Upload Android artifacts (if any)
+        uses: actions/upload-artifact@v4
+        with:
+          name: tinyalsa-android-artifacts
+          path: |
+            libs/**
+            obj/**
